@@ -1,0 +1,245 @@
+#ifndef CV_H
+#define CV_H
+
+#include<iostream>
+#include<abt.h>
+#include<chrono>
+#include<type_traits>
+
+#include"thread_Singleton.h"
+#include"mutex"
+
+namespace std 
+{
+	enum class cv_status 
+	{
+		no_timeout,
+		timeout
+	};
+
+	class condition_variable 
+	{
+		thread_Singleton* psingleton;
+
+		public:
+		ABT_cond cv_;	
+		condition_variable() 
+		{
+			cout << "Argobots CV" << endl;
+			psingleton = thread_Singleton::instance();
+			ABT_cond_create(&cv_);
+		}
+		condition_variable(condition_variable &) = delete;
+		~condition_variable () 
+		{
+			ABT_cond_free(&cv_);
+		}
+
+		void wait(unique_lock<std::mutex>& lck)
+		{
+			std::mutex* temp_ptr;
+			temp_ptr = lck.mutex();
+			ABT_cond_wait(cv_, temp_ptr->mtx_);
+		}
+
+		void notify_one() noexcept 
+		{
+			ABT_cond_signal(cv_);
+		}
+
+		void notify_all () 
+		{
+			ABT_cond_broadcast(cv_);
+		}
+
+
+		template <class Rep, class Period>
+		cv_status
+		wait_for (unique_lock<mutex>& lck,
+				  const std::chrono::duration<Rep,Period>& dur) 
+		{
+			std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+			std::mutex* temp_ptr;
+			temp_ptr = lck.mutex();
+
+			struct timespec ts;	
+
+			auto temp_sec = chrono::duration_cast<chrono::seconds>(dur).count();
+			if (temp_sec > 0) 
+			{
+
+				auto temp_cnt = chrono::duration_cast<chrono::nanoseconds>(dur).count();
+				auto multiplicand = chrono::duration_cast<chrono::nanoseconds>(chrono::seconds(1)).count(); 
+				auto rest_dur = temp_cnt - temp_sec * multiplicand; 
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += rest_dur; 
+			}
+			else
+			{
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += (long) std::chrono::duration_cast<chrono::nanoseconds>(dur).count();
+			}
+
+			ABT_cond_timedwait(cv_, temp_ptr->mtx_, &ts);
+			auto end = std::chrono::steady_clock::now();
+			if(std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+				return cv_status::no_timeout;
+			else
+				return cv_status::timeout;
+		}
+		template <class Clock, class Duration>
+		cv_status
+		wait_until (unique_lock<mutex>& lck,
+				    const chrono::time_point<Clock,Duration>& abs_time) 
+		{
+			auto start = chrono::steady_clock::now();
+
+			std::mutex* temp_ptr;
+			temp_ptr = lck.mutex();
+			struct timespec ts;	
+				
+			auto time_interval = abs_time - chrono::steady_clock::now();
+			auto temp_sec = chrono::duration_cast<chrono::seconds>(time_interval).count();
+
+			if (temp_sec > 0) 
+			{
+
+				auto temp_cnt = chrono::duration_cast<chrono::nanoseconds>(time_interval).count();
+				auto multiplicand = chrono::duration_cast<chrono::nanoseconds>(chrono::seconds(1)).count(); 
+				auto rest_dur = temp_cnt - temp_sec * multiplicand; 
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += rest_dur; 
+			}
+			else
+			{
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += (long) std::chrono::duration_cast<chrono::nanoseconds>(time_interval).count();
+			}
+
+			ABT_cond_timedwait(cv_, temp_ptr->mtx_, &ts);
+			auto end = std::chrono::steady_clock::now();
+			if(std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < time_interval)
+				return cv_status::no_timeout;
+			else
+				return cv_status::timeout;
+		}
+	};
+
+
+	template<class lockable_T>
+	class condition_variable_any 
+	{
+		thread_Singleton* psingleton;
+		lockable_T* lockable_ptr_;
+
+		public:
+		ABT_cond cv_;	
+		condition_variable_any() 
+		{
+			psingleton = thread_Singleton::instance();
+			ABT_cond_create(&cv_);
+		}
+		condition_variable_any(condition_variable_any &) = delete;
+		~condition_variable_any() 
+		{
+			ABT_cond_free(&cv_);
+		}
+
+		void wait(lockable_T& lck)
+		{
+			lockable_ptr_ = &lck;
+			lockable_ptr_ = lck.mutex();
+			ABT_cond_wait(cv_, lockable_ptr_->mtx_ptr_->mtx_);
+		}
+
+		void notify_one() noexcept 
+		{
+			ABT_cond_signal(cv_);
+		}
+
+		void notify_all () 
+		{
+			ABT_cond_broadcast(cv_);
+		}
+
+
+		template <class Rep, class Period>
+		cv_status
+		wait_for (lockable_T& lck,
+				  const std::chrono::duration<Rep,Period>& dur) 
+		{
+			std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+			lockable_ptr_ = &lck;	
+
+			struct timespec ts;	
+
+			auto temp_sec = chrono::duration_cast<chrono::seconds>(dur).count();
+			if (temp_sec > 0) 
+			{
+
+				auto temp_cnt = chrono::duration_cast<chrono::nanoseconds>(dur).count();
+				auto multiplicand = chrono::duration_cast<chrono::nanoseconds>(chrono::seconds(1)).count(); 
+				auto rest_dur = temp_cnt - temp_sec * multiplicand; 
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += rest_dur; 
+			}
+			else
+			{
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += (long) std::chrono::duration_cast<chrono::nanoseconds>(dur).count();
+			}
+
+			ABT_cond_timedwait(cv_, lockable_ptr_->mtx_ptr_->mtx_, &ts);
+			auto end = std::chrono::steady_clock::now();
+			if(std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+				return cv_status::no_timeout;
+			else
+				return cv_status::timeout;
+		}
+		template <class Clock, class Duration>
+		cv_status
+		wait_until (unique_lock<mutex>& lck,
+				    const chrono::time_point<Clock,Duration>& abs_time) 
+		{
+			auto start = chrono::steady_clock::now();
+
+			lockable_ptr_ = &lck;	
+			struct timespec ts;	
+				
+			auto time_interval = abs_time - chrono::steady_clock::now();
+			auto temp_sec = chrono::duration_cast<chrono::seconds>(time_interval).count();
+
+			if (temp_sec > 0) 
+			{
+
+				auto temp_cnt = chrono::duration_cast<chrono::nanoseconds>(time_interval).count();
+				auto multiplicand = chrono::duration_cast<chrono::nanoseconds>(chrono::seconds(1)).count(); 
+				auto rest_dur = temp_cnt - temp_sec * multiplicand; 
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += rest_dur; 
+			}
+			else
+			{
+				clock_gettime(_CLOCK_REALTIME, &ts);
+				ts.tv_sec += temp_sec; 
+				ts.tv_nsec += (long) std::chrono::duration_cast<chrono::nanoseconds>(time_interval).count();
+			}
+
+			ABT_cond_timedwait(cv_, lockable_ptr_->mtx_ptr_->mtx_, &ts);
+			auto end = std::chrono::steady_clock::now();
+			if(std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < time_interval)
+				return cv_status::no_timeout;
+			else
+				return cv_status::timeout;
+		}
+	};
+
+}
+#endif

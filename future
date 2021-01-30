@@ -1,0 +1,1251 @@
+#ifndef _FUTURE_H
+#define _FUTURE_H
+
+
+#include<abt.h>
+#include<cstdlib>
+#include<iostream>
+#include<chrono>
+#include<memory> // smart pointer
+#include<vector>
+#include<iterator>
+#include<algorithm> // std::swap
+#include<functional>
+#include<type_traits> // is_same, invoke_result
+
+#include "thread"
+
+namespace std 
+{
+	/* "launch" related */
+	enum class launch  
+	{
+		async = 1,	
+		deferred = 2	
+	};
+
+	constexpr launch operator&(launch __x, launch __y)
+	{
+		return static_cast<launch>(
+				static_cast<int>(__x) & static_cast<int>(__y));
+	}
+
+	constexpr launch operator|(launch __x, launch __y)
+	{
+		return static_cast<launch>(
+				static_cast<int>(__x) | static_cast<int>(__y));
+	}
+
+	constexpr launch operator^(launch __x, launch __y)
+	{
+		return static_cast<launch>(
+				static_cast<int>(__x) ^ static_cast<int>(__y));
+	}
+
+	constexpr launch operator~(launch __x)
+	{ return static_cast<launch>(~static_cast<int>(__x)); }
+
+	inline launch& operator&=(launch& __x, launch __y)
+	{ return __x = __x & __y; }
+
+	inline launch& operator|=(launch& __x, launch __y)
+	{ return __x = __x | __y; }
+
+	inline launch& operator^=(launch& __x, launch __y)
+	{ return __x = __x ^ __y; }
+
+
+	enum class future_status 
+	{
+		ready,
+		timeout,
+		deferred
+	};
+
+	template<class future_T>
+	struct shared_state
+	{
+		future_T ret_value_;
+	};
+
+	template<class Ret, class ...Args>
+	struct future_wrapper_args
+	{
+		std::tuple<Args...> tuple_;
+		std::function<Ret(Args...)> func_;
+	};
+
+	template<class sf_T>
+	class shared_future;
+
+	template<class future_T>
+	class future
+	{
+			// Pointers
+			shared_ptr<std::thread> t1_ptr_;
+			void * args_ptr_; // Used to free async created future_wrapper_args
+			std::shared_ptr<shared_state<future_T>> ss_ptr_; // shared_state pointer
+			std::shared_ptr<ABT_eventual> eventual_ptr_;
+
+			// Flags
+			int eventual_flag_; // Used to check if the future_eventual_ created
+			int deferred_flag_; // Used to indicate the launch policy
+			int ready_flag_; // Used to check future_status
+			bool valid_flag_;
+			int promise_created_flag_;
+			int pt_created_flag_; // packaged_task created flag
+
+			template<class Fn, class ...Args>
+			friend 
+			future<typename invoke_result<Fn, Args...>::type>
+			async(std::launch policy, Fn func_in, Args... args);
+
+			template<class promise_T>
+			friend
+			class promise;
+
+			template<class Fn, class ...Args>
+			friend
+			class packaged_task;
+
+			template<class sf_T>
+			friend
+			class shared_future;
+
+		public:
+			future () 
+			{
+				cout << "Argobots future" << endl;
+				eventual_flag_ = 0;
+				ready_flag_ = 0;
+				deferred_flag_ = 0;
+				args_ptr_ = nullptr;
+				valid_flag_ = 0;
+				promise_created_flag_ = 0;
+				pt_created_flag_ = 0;
+
+				ss_ptr_ = std::make_shared<shared_state<future_T>>();
+				eventual_ptr_ = std::make_shared<ABT_eventual>();
+				eventual_flag_ = ABT_eventual_create (0, &(*eventual_ptr_));
+			}
+
+			~future () 
+			{
+				cout << "bye Argobots future" << endl;
+				free(args_ptr_);
+				if (eventual_flag_ != 0)
+					ABT_eventual_free(&(*eventual_ptr_));
+			}
+
+			future(const future& other) = delete;
+
+			future(future&& other)
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+				std::swap(this->t1_ptr_, other.t1_ptr_);
+
+				std::swap(this->eventual_flag_, other.eventual_flag_);
+				std::swap(this->deferred_flag_, other.deferred_flag_);
+				std::swap(this->valid_flag_, other.valid_flag_);
+				std::swap(this->ready_flag_, other.ready_flag_);
+				std::swap(this->promise_created_flag_, other.promise_created_flag_);
+				std::swap(this->pt_created_flag_, other.pt_created_flag_);
+			}
+
+
+
+			future_T get() 
+			{
+				if (promise_created_flag_ == 1 || pt_created_flag_ == 1)
+				{
+					future_T ret;
+					ret = ss_ptr_->ret_value_;
+					ss_ptr_.reset(new shared_state<future_T>);
+					valid_flag_ = 0;
+					return ret;
+				}
+
+				/* For async created && launch is DEFERRED: return the shared_state in future */
+				future_T ret;
+				if (deferred_flag_ == 1) 
+				{
+					ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+					if (t1_ptr_->joinable())
+						t1_ptr_->join ();
+				}
+				/* For async created && launch is ASYNC: return the shared_state in future */
+				else 
+				{
+					if (t1_ptr_->joinable())
+					{
+						t1_ptr_->join ();
+					}
+				}
+
+				// For promise created future: return shared_state in promise
+				// return ss_ptr_->ret_value_;
+				ret = ss_ptr_->ret_value_;
+				ss_ptr_.reset(new shared_state<future_T>);
+				valid_flag_ = 0;
+				return ret;
+			}
+
+			bool valid () 
+			{
+				return valid_flag_;
+			}
+
+			std::shared_future<future_T>
+			share()
+			{
+				std::shared_future<future_T> sf;
+				std::swap(this->args_ptr_, sf.args_ptr_);
+				sf.ss_ptr_ = this->ss_ptr_; 
+				this->ss_ptr_.reset(new shared_state<future_T>);
+				sf.t1_ptr_ = this->t1_ptr_;
+				sf.eventual_ptr_ = this->eventual_ptr_;
+				sf.eventual_flag_ = this->eventual_flag_;
+				sf.deferred_flag_ = this->deferred_flag_;
+				sf.valid_flag_ = this->valid_flag_;
+				this->valid_flag_ = 0;
+				sf.ready_flag_ = this->ready_flag_;
+				sf.promise_created_flag_ = this->promise_created_flag_;
+				sf.pt_created_flag_ = this->pt_created_flag_;
+				shared_future<future_T>::num_copies_ = 2;
+				return sf;
+			}
+
+			void wait() 
+			{
+				if (deferred_flag_ != 1) 
+					ABT_eventual_wait(*eventual_ptr_, nullptr);
+				else	
+					cout << "future is in deferred status" << endl;
+			}
+
+			template <class Rep, class Period>
+			std::future_status 
+			wait_for (const std::chrono::duration<Rep, Period>& dur)
+			{
+				std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now ();
+				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+						end = std::chrono::steady_clock::now();
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+			}
+
+			template <class Clock, class Duration>
+			std::future_status
+			wait_until (const chrono::time_point<Clock,Duration>& abs_time)
+			{
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::steady_clock::now () < abs_time);
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+			}
+
+			void operator=(future<future_T>&& other)
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				this->ss_ptr_ = other.ss_ptr_;
+				this->t1_ptr_ = other.t1_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->eventual_flag_ = other.eventual_flag_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->valid_flag_ = other.valid_flag_;
+				this->ready_flag_ = other.ready_flag_;
+				this->promise_created_flag_ = other.promise_created_flag_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+			}
+
+			void operator=(const future<future_T>& other) = delete;
+
+			void operator=(future<future_T>& other) = delete;
+
+
+
+			template<class Fn, class ...Args>
+			inline void
+			future_wrapper_async (void* ptr)  
+			{
+				std::future_wrapper_args<future_T, Args...>*  fwa_ptr;
+				fwa_ptr = (std::future_wrapper_args<future_T, Args...>*) ptr;
+
+				future_T ret;
+				ret = std::apply(fwa_ptr->func_, fwa_ptr->tuple_);
+				ss_ptr_->ret_value_ = ret;
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+			}
+
+			template<class Fn, class ...Args>
+			inline void
+			future_wrapper_deferred (void* ptr)  
+			{
+				std::future_wrapper_args<future_T, Args...>*  fwa_ptr;
+				fwa_ptr = (std::future_wrapper_args<future_T, Args...>*) ptr;
+				ABT_eventual_wait(*eventual_ptr_, nullptr);
+
+				future_T ret;
+				ret = std::apply(fwa_ptr->func_, fwa_ptr->tuple_);
+				ss_ptr_->ret_value_ = ret;
+			}
+	};
+
+
+	template<class sf_T>
+	class shared_future;
+
+	template<>
+	class shared_future<void>;
+
+	template<>
+	class future<void>
+	{
+		// Pointers
+		void * args_ptr_; // Used to free async created future_wrapper_args
+		std::shared_ptr<std::thread> t1_ptr_;
+		std::shared_ptr<ABT_eventual> eventual_ptr_;
+
+		// Flags
+		int eventual_flag_; // Used to check if the future_eventual_ created
+		int deferred_flag_; // Used to indicate the launch policy
+		int ready_flag_; // Used to check future_status
+		bool valid_flag_; 
+		int pt_created_flag_;
+
+		template<class Fn, class ...Args>
+		friend 
+		future<typename invoke_result<Fn, Args...>::type>
+		async(std::launch policy, Fn func_in, Args... args);
+
+		template<class promise_T>
+		friend
+		class promise;
+
+		template<class Fn, class ...Args>
+		friend
+		class packaged_task;
+
+		template<class sf_T>
+		friend
+		class shared_future;
+
+		public:
+			future ()
+			{
+				cout << "Argobots future<void>" << endl;
+				args_ptr_ = nullptr;
+				eventual_flag_ = 0;
+				ready_flag_ = 0;
+				deferred_flag_ = 0;
+				valid_flag_ = 0;
+				pt_created_flag_ = 0;
+
+				eventual_ptr_ = std::make_shared<ABT_eventual>();
+				eventual_flag_ = ABT_eventual_create (0, &(*eventual_ptr_));
+			}
+
+			~future () 
+			{
+				cout << "bye Argobots future<void>" << endl;
+				free(args_ptr_);
+				if (eventual_flag_ != 0)
+					ABT_eventual_free(&(*eventual_ptr_));
+			}
+
+			future(const future& other) = delete;
+
+			future (future<void> && other)
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+				std::swap(this->deferred_flag_, other.deferred_flag_);
+				std::swap(this->valid_flag_, other.valid_flag_);
+				std::swap(this->ready_flag_, other.ready_flag_);
+				std::swap(this->pt_created_flag_, other.pt_created_flag_);
+				std::swap(this->t1_ptr_, other.t1_ptr_);
+			}
+
+
+
+			inline void 
+			get()
+			{
+				/* For async created && launch is DEFERRED: return the shared_state in future */
+				if (deferred_flag_ == 1) 
+				{
+					ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+					if (t1_ptr_->joinable())
+						t1_ptr_->join();
+				}
+				/* For async created && launch is ASYNC: return the shared_state in future */
+				else
+				{
+					if (t1_ptr_->joinable())
+						t1_ptr_->join();
+				}
+				valid_flag_ = 0;
+			}
+
+			inline void wait () 
+			{
+				if (deferred_flag_ != 1)
+					ABT_eventual_wait(*eventual_ptr_, nullptr);
+				else	
+					std::cout << "future is in deferred status" << endl;
+			}
+
+			inline bool valid () 
+			{
+				return valid_flag_;
+			}
+;
+			std::shared_future<void>
+			share();
+			// {
+			// }
+
+			template <class Rep, class Period>
+			std::future_status 
+			wait_for (const std::chrono::duration<Rep, Period>& dur)  
+			{
+				std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now ();
+				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+						end = std::chrono::steady_clock::now();
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+
+			}
+
+			template <class Clock, class Duration>
+			std::future_status
+			wait_until (const chrono::time_point<Clock,Duration>& abs_time) 
+			{
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::steady_clock::now () < abs_time);
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+			}
+
+			void 
+			operator=(future<void>&& other)
+			{
+				this->t1_ptr_ = other.t1_ptr_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+				this->valid_flag_= other.valid_flag_;
+				this->ready_flag_= other.ready_flag_;
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+			}
+
+			void
+			operator= (const future<void>&) = delete;
+
+
+
+			// Must put future_wrapper_args ahead 
+			template<class Fn, class ...Args>
+			inline void 
+			future_wrapper_async (void* ptr) 
+			{
+				std::future_wrapper_args<void, Args...>*  fwa_ptr;
+				fwa_ptr = (std::future_wrapper_args<void, Args...>*) ptr;
+				std::apply(fwa_ptr->func_, fwa_ptr->tuple_);	
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+			}
+
+			template<class Fn, class ...Args>
+			inline void
+			future_wrapper_deferred (void* ptr)  
+			{
+				std::future_wrapper_args<void, Args...>*  fwa_ptr;
+				fwa_ptr = (std::future_wrapper_args<void, Args...>*) ptr;
+				ABT_eventual_wait(*eventual_ptr_, nullptr);
+				std::apply(fwa_ptr->func_, fwa_ptr->tuple_);
+			}
+	};
+
+
+	template<class promise_T>
+	class promise 
+	{
+
+		std::shared_ptr<shared_state<promise_T>> ss_ptr_;
+		std::shared_ptr<ABT_eventual> eventual_ptr_;
+
+		public:
+			promise(){}
+
+			promise(promise && other) noexcept 
+			{
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+			}
+
+			promise(const promise &) = delete;
+
+			~promise(){}
+
+
+
+			future<promise_T>
+			get_future()
+			{
+				future<promise_T> fut;
+				fut.ss_ptr_ = make_shared<shared_state<promise_T>>();
+				ss_ptr_ = fut.ss_ptr_;
+				eventual_ptr_= fut.eventual_ptr_;
+				fut.promise_created_flag_ = 1;
+				fut.valid_flag_ = 1;
+				return fut;
+			}
+
+			void 
+			set_value(promise_T && arg_in)	
+			{
+				ss_ptr_->ret_value_ = arg_in;	
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);	
+			}
+
+			void 
+			set_value(const promise_T & arg_in)
+			{
+				ss_ptr_->ret_value_ = arg_in;	
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);	
+			}
+
+			void
+			set_value_at_thread_exit (promise_T && arg_in)
+			{
+				ss_ptr_->ret_value_ = arg_in;	
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);	
+			}
+
+			void
+			set_value_at_thread_exit (const promise_T & arg_in)
+			{
+				ss_ptr_->ret_value_ = arg_in;	
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);	
+			}
+
+			void
+			operator=(promise<promise_T> && other)
+			{
+				this->ss_ptr_ = other.ss_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+			}
+
+			void	
+			operator=(const promise<promise_T>&) = delete;
+
+			void
+			swap(promise<promise_T> && other) 
+			{
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+			}
+	};
+
+
+	template<class Ret, class ...Args>
+	class packaged_task;
+
+	template<class Ret, class ...Args>
+	class packaged_task<Ret(Args...)>
+	{
+		std::shared_ptr<shared_state<Ret>> ss_ptr_;
+		std::shared_ptr<ABT_eventual> eventual_ptr_;
+
+		std::function<Ret(Args...)> func_;
+		std::tuple<Args...> args_;
+
+		public:
+			/* Constructor */
+			packaged_task() noexcept {};
+			template<class Fn>
+			explicit
+			packaged_task(Fn && func_in) noexcept
+			{
+				func_ = func_in;	
+			}
+
+			packaged_task(packaged_task &) = delete;
+
+			packaged_task(packaged_task && other) noexcept 
+			{
+				std::swap(this->func_, other.func_);
+				std::swap(this->args_, other.args_);
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+			}
+
+			/* Destructor */
+			~packaged_task(){};
+
+
+
+			std::future<Ret> 
+			get_future()
+			{
+				future<Ret> fut;
+				fut.ss_ptr_ = make_shared<shared_state<Ret>>();
+				ss_ptr_ = fut.ss_ptr_;
+				eventual_ptr_= fut.eventual_ptr_;
+				fut.pt_created_flag_ = 1;
+				fut.valid_flag_ = 1;
+				return fut;
+			}
+
+			void 
+			make_ready_at_thread_exit (Args... args) 
+			{
+				args_ = std::make_tuple(args...);
+				ss_ptr_->ret_value_ = std::apply (func_, args_);
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+			}
+
+			packaged_task& 
+			operator= (packaged_task&& other) noexcept
+			{
+				this->func_ = other.func_;
+				this->args_ = other.args_;
+				this->ss_ptr_ = other.ss_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				return *this;
+			}
+
+			packaged_task& 
+			operator= (const packaged_task& other) = delete;
+
+			void 
+			operator()(Args... args)
+			{
+				args_ = std::make_tuple(args...);
+				ss_ptr_->ret_value_ = std::apply (func_, args_);
+			}
+
+			void 
+			reset() 
+			{
+				ss_ptr_ = nullptr;
+				eventual_ptr_ = nullptr;
+			}
+
+			void 
+			swap(packaged_task& other) noexcept 
+			{
+				std::swap(this->func_, other.func_);
+				std::swap(this->args_, other.args_);
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+			}
+	};
+
+	template<class ...Args>
+	class packaged_task<void(Args...)>
+	{
+		std::shared_ptr<ABT_eventual> eventual_ptr_;
+		std::function<void(Args...)> func_;
+		std::tuple<Args...> args_;
+
+		public:
+			/* Constructor */
+			packaged_task() noexcept {};
+			template<class Fn>
+			explicit
+			packaged_task(Fn && func_in) noexcept 
+			{
+				func_ = func_in;
+			}
+
+			packaged_task(packaged_task &) = delete;
+
+			packaged_task(packaged_task && other) noexcept 
+			{
+				std::swap(this->func_, other.func_);
+				std::swap(this->args_, other.args_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+			}
+
+			/* Destructor */
+			~packaged_task(){};
+
+
+
+			std::future<void> 
+			get_future()
+			{
+				future<void> fut;
+				eventual_ptr_= fut.eventual_ptr_;
+				fut.pt_created_flag_ = 1;
+				fut.valid_flag_ = 1;
+				return fut;
+			}
+			void 
+			make_ready_at_thread_exit (Args... args) 
+			{
+				args_ = std::make_tuple(args...);
+				std::apply (func_, args_);
+				ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+			}
+
+			packaged_task& 
+			operator= (packaged_task&& other) noexcept 
+			{
+				this->func_ = other.func_;
+				this->args_ = other.args_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				return *this;
+			}
+
+			packaged_task& 
+			operator= (const packaged_task& other) = delete;
+
+			void 
+			operator()(Args... args) 
+			{
+				args_ = std::make_tuple(args...);
+				std::apply (func_, args_);
+			}
+
+			void 
+			reset() 
+			{
+				eventual_ptr_ = nullptr;
+			}
+
+			void 
+			swap (packaged_task& other) noexcept 
+			{
+				std::swap(this->func_, other.func_);
+				std::swap(this->args_, other.args_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+			}
+	};
+
+	template<class sf_T>
+	class shared_future 
+	{
+		template<class future_T>
+		friend class future;
+
+		// Pointers
+		std::shared_ptr<std::thread>  t1_ptr_;
+		std::shared_ptr<shared_state<sf_T>> ss_ptr_; // shared_state pointer
+		std::shared_ptr<ABT_eventual> eventual_ptr_;
+		void * args_ptr_; // Used to free async created future_wrapper_args
+		
+		// Flags
+		int eventual_flag_; // Indicates if the future_eventual_ is created
+		int deferred_flag_; // Indicates the launch policy
+		int ready_flag_; // Indicates future_status
+		bool valid_flag_; // Indicates if owns valid shared state
+		int promise_created_flag_; // Indicates promise created 
+		int pt_created_flag_; // Indicates packaged_task created
+
+		inline static int num_copies_ = 0;
+
+		public:
+			shared_future() noexcept 
+			{
+				args_ptr_ = nullptr;
+
+				eventual_flag_ = 0;
+				ready_flag_ = 0;
+				deferred_flag_ = 0;
+				valid_flag_ = 0;
+				promise_created_flag_ = 0;
+				pt_created_flag_ = 0;
+			}
+
+			shared_future (const shared_future<sf_T>& other) 
+			{
+				this->args_ptr_ = other.args_ptr_;
+				this->t1_ptr_ = other.t1_ptr_;
+				this->ss_ptr_ = other.ss_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->eventual_flag_ = other.eventual_flag_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->valid_flag_ = other.valid_flag_;
+				this->ready_flag_ = other.ready_flag_;
+				this->promise_created_flag_ = other.promise_created_flag_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+				num_copies_++;
+			}
+
+			shared_future (shared_future<sf_T>&& other) noexcept 
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				std::swap(this->t1_ptr_, other.t1_ptr_);
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+				std::swap(this->eventual_flag_, other.eventual_flag_);
+				std::swap(this->deferred_flag_, other.deferred_flag_);
+				std::swap(this->valid_flag_, other.valid_flag_);
+				std::swap(this->ready_flag_, other.ready_flag_);
+				std::swap(this->promise_created_flag_, other.promise_created_flag_);
+				std::swap(this->pt_created_flag_, other.pt_created_flag_);
+			}
+
+			shared_future (future<sf_T>&& other) noexcept 
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				std::swap(this->t1_ptr_, other.t1_ptr_);
+				t1_ptr_->join();
+				std::swap(this->ss_ptr_, other.ss_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+
+				std::swap(this->eventual_flag_, other.eventual_flag_);
+				std::swap(this->deferred_flag_, other.deferred_flag_);
+				valid_flag_ = 0;
+				std::swap(this->valid_flag_, other.valid_flag_);
+				std::swap(this->ready_flag_, other.ready_flag_);
+				std::swap(this->promise_created_flag_, other.promise_created_flag_);
+				std::swap(this->pt_created_flag_, other.pt_created_flag_);
+				shared_future<sf_T>::num_copies_ = 1;
+			}
+
+			~shared_future ()
+			{
+				if (num_copies_ == 0)
+					free(args_ptr_);
+				if (eventual_flag_ != 0)
+					ABT_eventual_free(&(*eventual_ptr_));
+				if(num_copies_ > 0)
+					num_copies_--;
+			}
+
+
+
+			sf_T get() 
+			{
+				if (promise_created_flag_ == 1 || pt_created_flag_ == 1)
+				{
+					sf_T ret;
+					ret = ss_ptr_->ret_value_;
+					return ret;
+				}
+
+				/* For async created && launch is DEFERRED: return the shared_state in future */
+				sf_T ret;
+				if (deferred_flag_ == 1) 
+				{
+					ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+					if(t1_ptr_->joinable())
+						t1_ptr_->join();
+				}
+				/* For async created && launch is ASYNC: return the shared_state in future */
+				else 
+				{
+					if(t1_ptr_->joinable())
+						t1_ptr_->join();
+				}
+
+				// For promise created future: return shared_state in promise
+				ret = ss_ptr_->ret_value_;
+				return ret;
+			}
+
+			void wait() 
+			{
+				if (deferred_flag_ != 1) 
+					ABT_eventual_wait(*eventual_ptr_, nullptr);
+				else	
+					cout << "future is in deferred status" << endl;
+			}
+
+			bool valid() 
+			{
+				return valid_flag_;
+			}
+
+			int get_count() 
+			{
+				return num_copies_; 
+			}
+
+			shared_future<sf_T>& operator=(shared_future<sf_T>&& other) 
+			{
+				this->args_ptr_ = other.args_ptr_;
+				this->ss_ptr_ = other.ss_ptr_;
+				this->t1_ptr_ = other.t1_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->eventual_flag_ = other.eventual_flag_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->valid_flag_ = other.valid_flag_;
+				this->ready_flag_ = other.ready_flag_;
+				this->promise_created_flag_ = other.promise_created_flag_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+				// The rvalue reference will destory one num_copies_ when destruction, the rest one will be used to count the lvalue.
+				shared_future<sf_T>::num_copies_ = 2;
+				return *this;
+			}
+
+			shared_future<sf_T>& operator=(const shared_future<sf_T>& other) 
+			{
+				this->args_ptr_ = other.args_ptr_;
+				this->ss_ptr_ = other.ss_ptr_;
+				this->t1_ptr_ = other.t1_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->eventual_flag_ = other.eventual_flag_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->valid_flag_ = other.valid_flag_;
+				this->ready_flag_ = other.ready_flag_;
+				this->promise_created_flag_ = other.promise_created_flag_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+				shared_future<sf_T>::num_copies_++;
+				return *this;
+			}
+
+			template <class Rep, class Period>
+			std::future_status 
+			wait_for (const std::chrono::duration<Rep, Period>& dur) 
+			{
+				std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now ();
+				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+						end = std::chrono::steady_clock::now();
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+			}
+
+			template <class Clock, class Duration>
+			std::future_status
+			wait_until (const chrono::time_point<Clock,Duration>& abs_time)
+			{
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::steady_clock::now () < abs_time);
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+			}
+	};
+
+	template<>
+	class shared_future<void> 
+	{
+		// template<class future_T>
+		// friend class future;
+
+		friend class future<void>;
+		
+		// Pointers
+		std::shared_ptr<std::thread>  t1_ptr_;
+		std::shared_ptr<ABT_eventual> eventual_ptr_;
+		void * args_ptr_; // Used to free async created future_wrapper_args
+		
+		// Flags
+		int eventual_flag_; // Indicates if the future_eventual_ is created
+		int deferred_flag_; // Indicates the launch policy
+		int ready_flag_; // Indicates future_status
+		bool valid_flag_; // Indicates if owns valid shared state
+		int pt_created_flag_; // Indicates packaged_task created
+
+		inline static int num_copies_ = 0;
+
+		public:
+			shared_future() noexcept 
+			{
+				args_ptr_ = nullptr;
+				eventual_flag_ = 0;
+				ready_flag_ = 0;
+				deferred_flag_ = 0;
+				valid_flag_ = 0;
+				pt_created_flag_ = 0;
+				num_copies_ = 0;
+			}
+
+			shared_future(const shared_future<void>& other) 
+			{
+				this->args_ptr_ = other.args_ptr_;
+				this->t1_ptr_ = other.t1_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->eventual_flag_ = other.eventual_flag_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->valid_flag_ = other.valid_flag_;
+				this->ready_flag_ = other.ready_flag_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+				num_copies_++;
+			}
+
+			shared_future(shared_future<void>&& other) noexcept 
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				std::swap(this->t1_ptr_, other.t1_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+				std::swap(this->eventual_flag_, other.eventual_flag_);
+				std::swap(this->deferred_flag_, other.deferred_flag_);
+				std::swap(this->valid_flag_, other.valid_flag_);
+				std::swap(this->ready_flag_, other.ready_flag_);
+				std::swap(this->pt_created_flag_, other.pt_created_flag_);
+			}
+
+			shared_future (future<void>&& other) noexcept 
+			{
+				this->args_ptr_ = nullptr;
+				std::swap(this->args_ptr_, other.args_ptr_);
+				std::swap(this->t1_ptr_, other.t1_ptr_);
+				std::swap(this->eventual_ptr_, other.eventual_ptr_);
+				std::swap(this->eventual_flag_, other.eventual_flag_);
+				std::swap(this->deferred_flag_, other.deferred_flag_);
+				std::swap(this->valid_flag_, other.valid_flag_);
+				std::swap(this->ready_flag_, other.ready_flag_);
+				std::swap(this->pt_created_flag_, other.pt_created_flag_);
+				num_copies_ = 1;
+			}
+			~shared_future () 
+			{
+				if (num_copies_ == 0)
+					free(args_ptr_);
+				if (eventual_flag_ != 0)
+					ABT_eventual_free(&(*eventual_ptr_));
+				if (num_copies_ > 0)
+					num_copies_--;
+			}
+
+
+
+			void wait() 
+			{
+				if (deferred_flag_ != 1) 
+					ABT_eventual_wait(*eventual_ptr_, nullptr);
+				else	
+					cout << "future is in deferred status" << endl;
+			}
+
+			void get() 
+			{
+				if(deferred_flag_ == 1)
+				{
+					ABT_eventual_set(*eventual_ptr_, nullptr, 0);
+					if(t1_ptr_->joinable())
+						t1_ptr_->join();
+				}
+				else 
+				{
+					if(t1_ptr_->joinable())
+						t1_ptr_->join();
+				}
+			}
+
+			int get_count() 
+			{
+				return num_copies_;
+			}
+
+			bool valid() 
+			{
+				return valid_flag_;
+			}
+
+			shared_future<void>& operator=(shared_future<void>&& other) 
+			{
+				this->args_ptr_ = other.args_ptr_;
+				this->t1_ptr_ = other.t1_ptr_;
+				this->eventual_ptr_ = other.eventual_ptr_;
+				this->eventual_flag_ = other.eventual_flag_;
+				this->deferred_flag_ = other.deferred_flag_;
+				this->valid_flag_ = other.valid_flag_;
+				this->ready_flag_ = other.ready_flag_;
+				this->pt_created_flag_ = other.pt_created_flag_;
+				return *this;
+			}
+
+			shared_future<void>& operator=(const shared_future<void>& other) = delete;
+
+			template <class Rep, class Period>
+			std::future_status 
+			wait_for (const std::chrono::duration<Rep, Period>& dur) 
+			{
+				std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now ();
+				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+						end = std::chrono::steady_clock::now();
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+
+			}
+
+			template <class Clock, class Duration>
+			std::future_status
+			wait_until (const chrono::time_point<Clock,Duration>& abs_time) 
+			{
+				ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+				if (this->ready_flag_ == 1)	
+					return std::future_status::ready;
+				else if (this->deferred_flag_ == 1) 
+				{
+					return std::future_status::deferred;
+				}
+				else 
+				{
+					while (std::chrono::steady_clock::now () < abs_time);
+
+					ABT_eventual_test(*eventual_ptr_, nullptr, &this->ready_flag_);  
+					if (this->ready_flag_ == 1)
+						return std::future_status::ready;
+					else
+						return std::future_status::timeout;
+				}
+			}
+	};
+
+	inline shared_future<void> future<void>::share() 
+	{
+		shared_future<void> sf;				
+		std::swap(this->args_ptr_, sf.args_ptr_);
+		sf.t1_ptr_ = this->t1_ptr_;
+		sf.eventual_ptr_ = this->eventual_ptr_;
+		sf.eventual_flag_ = this->eventual_flag_;
+		sf.deferred_flag_ = this->deferred_flag_;
+		sf.valid_flag_ = this->valid_flag_;
+		this->valid_flag_ = 0;
+		sf.ready_flag_ = this->ready_flag_;
+		sf.pt_created_flag_ = this->pt_created_flag_;
+		std::shared_future<void>::num_copies_ = 2;
+		return sf;
+	}
+
+
+	template<class Fn, class ...Args>
+	future<typename invoke_result<Fn, Args...>::type>
+	async (launch policy, Fn func_in, Args ...args) 
+	{
+		typedef typename std::invoke_result<decltype(func_in), Args...>::type mytype_;
+		future<mytype_> fut;
+
+		future_wrapper_args<mytype_, Args...> * fwa_ptr;
+		fwa_ptr = new future_wrapper_args<mytype_, Args...>; 
+		fut.args_ptr_ = fwa_ptr;
+		fut.valid_flag_ = 1;
+
+		fwa_ptr->func_ = func_in;
+		fwa_ptr->tuple_ = std::make_tuple(args...); 
+		fut.t1_ptr_ = make_shared<std::thread>();
+		// fwa_ptr->eventual_ = fut.future_eventual_;
+
+		if (policy == std::launch::async) 
+		{
+			*(fut.t1_ptr_) = std::thread([&fut](void * ptr){fut.template future_wrapper_async <decltype(fwa_ptr->func_), Args...> (ptr);}, fwa_ptr);
+		}
+		else if (policy == std::launch::deferred) 
+		{
+			fut.deferred_flag_ = 1;
+			*(fut.t1_ptr_) = std::thread([&fut](void* ptr)  
+					{
+					fut.template future_wrapper_deferred <decltype(fwa_ptr->func_), Args...> (ptr);
+					}, fwa_ptr);
+		}
+		return fut;
+	}
+};
+
+#endif
+
+

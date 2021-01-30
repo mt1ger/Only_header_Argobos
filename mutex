@@ -1,0 +1,332 @@
+#ifndef MUTEX_H
+#define MUTEX_H
+
+#include<iostream>
+#include<abt.h>
+#include<chrono>
+#include"thread_Singleton.h"
+
+namespace std 
+{
+	struct try_to_lock_t {};
+	struct adopt_lock_t {};
+	struct defer_lock_t {};
+
+	constexpr try_to_lock_t try_to_lock {};
+	constexpr adopt_lock_t adopt_lock {};
+	constexpr defer_lock_t defer_lock {};
+
+	class mutex 
+	{
+		thread_Singleton* psingleton;
+		bool lock_flag_;
+
+		public:
+			ABT_mutex mtx_;	
+			ABT_mutex* mtx_ptr_;
+			mutex() noexcept 
+			{
+				cout << "Argobots mutex" << endl;
+				mtx_ptr_ = &mtx_;
+				psingleton = thread_Singleton::instance();
+				ABT_mutex_create(&mtx_);
+				lock_flag_ = 0;
+			};
+			~mutex() 
+			{
+				ABT_mutex_free(&mtx_);
+			};
+			mutex (const mutex&) = delete;
+			void lock()
+			{
+				ABT_mutex_lock(mtx_);
+				lock_flag_ = 1;
+			}
+			void unlock() 
+			{
+				ABT_mutex_unlock(mtx_);
+				lock_flag_ = 0;
+			}
+			bool try_lock() 
+			{
+				bool lockable;
+				lockable = ABT_mutex_trylock(mtx_);
+				if (lockable)
+					lock_flag_ = 1;
+				return lockable;
+			}
+			// native_handle_type native_handle ();
+	};
+
+	class timed_mutex  
+	{
+		thread_Singleton* psingleton;
+		bool lock_flag_;
+
+		public:
+			ABT_mutex mtx_;	
+			ABT_mutex* mtx_ptr_;
+			timed_mutex() noexcept 
+			{
+				mtx_ptr_ = &mtx_;
+				psingleton = thread_Singleton::instance();
+				ABT_mutex_create(&mtx_);
+				lock_flag_ = 0;
+			};
+			~timed_mutex() 
+			{
+				ABT_mutex_free(&mtx_);
+			};
+			timed_mutex (const timed_mutex&) = delete;
+			void lock()
+			{
+				ABT_mutex_lock(mtx_);
+				lock_flag_ = 1;
+			}
+			void unlock() 
+			{
+				ABT_mutex_unlock(mtx_);
+				lock_flag_ = 0;
+			}
+			bool try_lock() 
+			{
+				bool lockable;
+				lockable = ABT_mutex_trylock(mtx_);
+				if (lockable)
+					lock_flag_ = 1;
+				return lockable;
+			}
+
+			template <class Rep, class Period>
+			bool try_lock_for (const chrono::duration<Rep,Period>& dur) 
+			{
+				bool lockable = 0;
+				auto end = chrono::steady_clock::now();
+				auto start = chrono::steady_clock::now();
+				while (chrono::duration_cast<chrono::duration<Rep, Period>>(end - start) < dur)
+					lockable = try_lock();
+				return lockable;
+			}
+
+			template <class Clock, class Duration>
+			bool try_lock_until (const chrono::time_point<Clock,Duration>& abs_time)
+			{
+				bool lockable = 0;
+				while(chrono::duration_cast<chrono::time_point<Clock, Duration>>(chrono::steady_clock::now()) < abs_time) 
+				{
+					lockable = try_lock();
+				}
+				return lockable;
+			}
+	};
+
+	class recursive_mutex
+	{
+		thread_Singleton* psingleton;
+		bool lock_flag_;
+		ABT_mutex_attr mtx_attr_;	
+
+		public:
+			ABT_mutex mtx_; 
+			ABT_mutex* mtx_ptr_;
+			recursive_mutex() noexcept 
+			{
+				mtx_ptr_ = &mtx_;
+				psingleton = thread_Singleton::instance();
+				ABT_mutex_attr_create(&mtx_attr_);
+				ABT_mutex_attr_set_recursive(mtx_attr_, ABT_TRUE);
+				ABT_mutex_create_with_attr(mtx_attr_, &mtx_);
+				lock_flag_ = 0;
+			};
+			~recursive_mutex() 
+			{
+				ABT_mutex_attr_free(&mtx_attr_);
+				ABT_mutex_free(&mtx_);
+			};
+			recursive_mutex(const recursive_mutex&) = delete;
+			void lock()
+			{
+				ABT_mutex_lock(mtx_);
+				lock_flag_ = 1;
+			}
+			void unlock() 
+			{
+				ABT_mutex_unlock(mtx_);
+				lock_flag_ = 0;
+			}
+			bool try_lock() 
+			{
+				bool lockable;
+				lockable = ABT_mutex_trylock(mtx_);
+				if (lockable)
+					lock_flag_ = 1;
+				return lockable;
+			}
+			// native_handle_type native_handle ();
+	};
+
+	template<class Mutex>
+	class unique_lock 
+	{
+		Mutex* mtx_ptr_;
+		bool ownership_flag_;
+
+		public:	
+			unique_lock() noexcept 
+			{
+				ownership_flag_ = 0;
+			};
+			~unique_lock() 
+			{
+				mtx_ptr_->unlock ();
+			};
+			explicit unique_lock(Mutex & mtx_in) 
+			{
+				mtx_ptr_ = &mtx_in;
+				mtx_ptr_ ->lock();
+				ownership_flag_ = 1;
+			}
+			unique_lock (Mutex& mtx_in, try_to_lock_t tag) 
+			{
+				mtx_ptr_ = &mtx_in;
+				bool lockable;
+				lockable = mtx_ptr_ ->try_lock();
+				if (lockable)
+					ownership_flag_ = 1;
+			}
+			unique_lock (Mutex& mtx_in, defer_lock_t tag) noexcept 
+			{
+				mtx_ptr_ = &mtx_in;
+				ownership_flag_ = 0;
+			}
+			unique_lock (Mutex& mtx_in, adopt_lock_t tag) 
+			{
+				mtx_ptr_ = &mtx_in;
+				ownership_flag_ = 1;
+			}
+			template <class Rep, class Period>
+			unique_lock (Mutex& mtx_in, const std::chrono::duration<Rep,Period>& rel_time);
+			template <class Clock, class Duration>
+			unique_lock (Mutex& mtx_in, const std::chrono::time_point<Clock,Duration>& abs_time);
+			unique_lock (const unique_lock&) = delete;
+			unique_lock (unique_lock&& other) 
+			{
+				this->mtx_ptr_ = other.mtx_ptr_;
+				this->ownership_flag_ = other.ownership_flag_;
+			}
+
+			void
+			lock () 
+			{
+				mtx_ptr_->lock();
+				ownership_flag_ = 1;
+			}
+			void unlock() 
+			{
+				mtx_ptr_->unlock();
+				ownership_flag_ = 0;
+			}
+			bool try_lock() 
+			{
+				bool lockable;
+				lockable = mtx_ptr_->try_lock();
+				if (lockable)
+					ownership_flag_ = 1;
+				return lockable;
+			}
+
+			unique_lock& operator= (unique_lock&& other) noexcept 
+			{
+				this->mtx_ptr_ = other.mtx_ptr_; 
+				this->ownership_flag_ = other.ownership_flag_; 
+			}
+			unique_lock& operator= (const unique_lock&) = delete;
+
+			void swap(unique_lock & other) 
+			{
+				std::swap(this->mtx_ptr_, other.mtx_ptr_);
+				std::swap(this->ownership_flag_, other.ownership_flag_);
+			}
+
+			bool owns_lock() const noexcept 
+			{
+				if (mtx_ptr_->lock_flag == 1)
+					return 1;
+				else
+					return 0;
+			}
+
+			Mutex* 
+			mutex() 
+			{
+				return mtx_ptr_;
+			}
+
+			operator bool () 
+			{
+				bool w;
+				if (ownership_flag_)
+					w = 1;
+				else
+					w = 0;
+				return w;
+			}
+
+			Mutex*
+			release () 
+			{
+				Mutex* temp;
+				temp = mtx_ptr_;
+				mtx_ptr_ = nullptr;
+				return temp;
+			}
+
+			template <class Rep, class Period>
+			bool try_lock_for (const std::chrono::duration<Rep,Period>& dur) 
+			{
+				std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now ();
+				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now ();
+				while (std::chrono::duration_cast<std::chrono::milliseconds>(end - start) < dur)
+					end = std::chrono::steady_clock::now();
+				bool lockable;
+				lockable = mtx_ptr_->try_lock ();
+				if (lockable)
+					ownership_flag_ = 1;
+				return lockable;
+
+			}
+
+			template <class Clock, class Duration>
+			bool try_lock_until (const std::chrono::time_point<Clock,Duration>& abs_time)
+			{
+				while (std::chrono::steady_clock::now () < abs_time);
+				bool lockable;
+				lockable = mtx_ptr_->try_lock ();
+				if (lockable)
+					ownership_flag_ = 1;
+				return lockable;
+			}
+	};
+
+	template<class Mutex>
+	class lock_guard 
+	{
+		Mutex* mutex_ptr_;	
+		public:
+			explicit lock_guard (Mutex& mtx_in) 
+			{
+				mutex_ptr_ = &mtx_in;
+				mtx_in.lock();
+			}
+			lock_guard (Mutex& mtx_in, adopt_lock_t tag) 
+			{
+				mutex_ptr_ = &mtx_in;	
+			}
+			lock_guard (const lock_guard&) = delete;
+			~lock_guard()
+			{
+				mutex_ptr_->unlock();
+			}
+	};
+}
+#endif
