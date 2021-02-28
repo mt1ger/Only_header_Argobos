@@ -1,5 +1,5 @@
-#ifndef MUTEX_H
-#define MUTEX_H
+#ifndef _ARGOBOTS_MUTEX_H
+#define _ARGOBOTS_MUTEX_H
 
 #include<iostream>
 #include<abt.h>

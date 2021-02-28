@@ -1,5 +1,5 @@
-#ifndef __THREAD_H
-#define __THREAD_H
+#ifndef _ARGOBOTS_THREAD_H
+#define _ARGOBOTS_THREAD_H
 
 #include<abt.h>
 #include<functional>
@@ -69,7 +69,7 @@ namespace std
 				int rank;
 				int flag;
 
-				cout <<"Argobots thread_d" << endl;
+				// cout <<"Argobots thread_d" << endl;
 				psingleton = thread_Singleton::instance();
 
 				typedef typename std::invoke_result<decltype(func_in), Args...>::type mytype_; 
@@ -194,6 +194,7 @@ namespace std
 			template<class Fn, class ...Args>
 			thread (Fn func_in, Args ...args)
 			{
+				// cout << "Argobots thread" << endl;
 				int rank;
 				int flag;
 			
@@ -241,8 +242,7 @@ namespace std
 			void detach();
 			bool joinable() 
 			{
-				// return !(__id == id());
-				return __id < id();
+				return !(__id == id());
 			}
 			id get_id() const noexcept 
 			{

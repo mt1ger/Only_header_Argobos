@@ -1,5 +1,5 @@
-#ifndef CV_H
-#define CV_H
+#ifndef _ARGOBOTS_CV_H
+#define _ARGOBOTS_CV_H
 
 #include<iostream>
 #include<abt.h>

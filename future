@@ -1,5 +1,5 @@
-#ifndef _FUTURE_H
-#define _FUTURE_H
+#ifndef _ARGOBOTS_FUTURE_H
+#define _ARGOBOTS_FUTURE_H
 
 
 #include<abt.h>
